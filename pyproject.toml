@@ -12,6 +12,8 @@ dependencies = [
     "audioop-lts",
     "python-dotenv",
     "websockets",
+    "scipy",
+    "numpy",
 ]
 
 [project.scripts]
