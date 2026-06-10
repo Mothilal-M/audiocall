@@ -5,7 +5,7 @@ description = "Voice agent powered by Twilio and Google ADK (Gemini Live API)"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "google-adk>=1.27.3",
+    "google-adk==2.2.0",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "twilio>=9.0.0",
