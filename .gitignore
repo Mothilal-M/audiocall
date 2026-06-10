@@ -11,3 +11,6 @@ wheels/
 
 # env files
 .env
+
+# Local Google Cloud credentials used only for container builds
+google_service_account.json

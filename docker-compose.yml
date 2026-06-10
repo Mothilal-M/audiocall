@@ -23,10 +23,12 @@ services:
       VIRTUAL_PORT: "8000"
       LETSENCRYPT_HOST: ${DOMAIN}
       LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL}
+      GOOGLE_APPLICATION_CREDENTIALS: /home/ubuntu/audiocall/google_service_account.json
       # --- Google ADK / Gemini ---
-      GOOGLE_GENAI_USE_VERTEXAI: ${GOOGLE_GENAI_USE_VERTEXAI:-FALSE}
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
-      AGENT_MODEL: ${AGENT_MODEL:-gemini-2.5-flash-native-audio-preview-12-2025}
+      GOOGLE_GENAI_USE_VERTEXAI: ${GOOGLE_GENAI_USE_VERTEXAI:-True}
+      AGENT_MODEL: ${AGENT_MODEL:-gemini-live-2.5-flash-native-audio}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
+      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION}
       # --- Twilio ---
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}

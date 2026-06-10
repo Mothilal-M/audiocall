@@ -12,6 +12,11 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
+# Copy the Google service account JSON into the image at the path the app expects.
+RUN mkdir -p /home/ubuntu/audiocall
+COPY google_service_account.json /home/ubuntu/audiocall/google_service_account.json
+ENV GOOGLE_APPLICATION_CREDENTIALS="/home/ubuntu/audiocall/google_service_account.json"
+
 # 1) Install only third-party deps first (cached unless the lockfile changes).
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
