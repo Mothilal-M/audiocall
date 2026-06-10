@@ -1,0 +1,46 @@
+# ---- Audiocall — VM deployment ----
+# One more container behind the EXISTING nginx-proxy + acme-companion from the
+# doc-extractor stack. Joins that proxy's network and advertises itself via
+# VIRTUAL_HOST, so it gets routed + an auto TLS cert (and WebSocket upgrades,
+# which nginx-proxy handles by default) with no changes to the other stacks.
+#
+# Prereq: a DNS A record  audio-call.10xscale.ai -> <VM public IP>
+#
+# Bring up:  docker compose --env-file .env.production up -d --build
+
+services:
+  audiocall:
+    build:
+      context: .
+    image: audiocall:latest
+    container_name: audiocall
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      # --- reverse proxy / TLS wiring (existing nginx-proxy) ---
+      VIRTUAL_HOST: ${DOMAIN}
+      VIRTUAL_PORT: "8000"
+      LETSENCRYPT_HOST: ${DOMAIN}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL}
+      # --- Google ADK / Gemini ---
+      GOOGLE_GENAI_USE_VERTEXAI: ${GOOGLE_GENAI_USE_VERTEXAI:-FALSE}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      AGENT_MODEL: ${AGENT_MODEL:-gemini-2.5-flash-native-audio-preview-12-2025}
+      # --- Twilio ---
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER}
+      # --- server: public host Twilio reaches; TLS on (we're behind HTTPS) ---
+      SERVER_HOST: ${DOMAIN}
+      USE_TLS: "true"
+      PORT: "8000"
+    networks:
+      - proxy
+
+networks:
+  # Network created by the doc-extractor compose stack, where nginx-proxy +
+  # acme-companion live. Joining it lets the proxy discover this container.
+  proxy:
+    external: true
+    name: doc-extractor-ocr_default
