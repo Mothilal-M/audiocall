@@ -161,6 +161,11 @@ SERVER_HOST: str = (
 )
 USE_TLS: bool = os.environ.get("USE_TLS", "true").lower() == "true"
 
+# How long the caller must be silent (ms) before Gemini treats the utterance
+# as finished and starts replying.  Lower = snappier responses, but too low
+# cuts callers off when they pause mid-sentence.  Tune via env, no rebuild.
+VAD_SILENCE_MS: int = int(os.environ.get("VAD_SILENCE_MS", "200"))
+
 WS_SCHEME = "wss" if USE_TLS else "ws"
 HTTP_SCHEME = "https" if USE_TLS else "http"
 
@@ -285,12 +290,18 @@ async def stream_websocket(websocket: WebSocket) -> None:
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
         # Tighten VAD: respond faster after the caller stops speaking.
-        # END_SENSITIVITY_HIGH + 300 ms silence reduces the "wait" after each
-        # utterance from the default ~800 ms down to ~300 ms.
+        # END_SENSITIVITY_HIGH + a short silence window cuts the "wait" after
+        # each utterance from the default ~800 ms down to VAD_SILENCE_MS.
+        # START_SENSITIVITY_HIGH makes Gemini notice the caller's voice sooner
+        # (faster turn starts and barge-in).  If callers get cut off while
+        # pausing mid-sentence, raise VAD_SILENCE_MS (e.g. 300-400).
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
+                start_of_speech_sensitivity=(
+                    types.StartSensitivity.START_SENSITIVITY_HIGH
+                ),
                 end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
-                silence_duration_ms=300,
+                silence_duration_ms=VAD_SILENCE_MS,
             )
         ),
     )
