@@ -28,8 +28,7 @@ import json
 import logging
 import os
 import uuid
-from collections import deque
-from typing import Deque
+from math import gcd
 
 # audioop-lts is a drop-in replacement for the stdlib `audioop` module that was
 # removed in Python 3.13.  Install it with: pip install audioop-lts
@@ -59,46 +58,71 @@ from audiocall.agent import root_agent  # noqa: E402
 # Audio processing utilities
 # ---------------------------------------------------------------------------
 
-# Buffer size: accumulate ~100ms of audio before processing to reduce choppiness
-# Twilio sends 20ms chunks (160 bytes μ-law @ 8kHz)
-# 5 chunks = 100ms, which provides smoother streaming
-BUFFER_CHUNK_COUNT = 5
 
-
-def resample_audio(
-    audio_data: bytes, in_rate: int, out_rate: int, sample_width: int = 2
-) -> bytes:
+class StreamingResampler:
     """
-    High-quality audio resampling using scipy.signal.resample_poly.
+    Stateful sample-rate converter for streaming PCM-16 audio.
 
-    This provides much better quality than audioop.ratecv, which uses
-    simple linear interpolation.
+    Carrying the FIR filter delay-line state (``zi``) across calls makes
+    chunked processing bit-identical to filtering the whole stream at once,
+    so chunk boundaries introduce no discontinuities — unlike calling
+    ``scipy.signal.resample_poly`` per chunk, whose per-call filter edge
+    effects produce audible clicks/warble at every boundary.
 
-    Args:
-        audio_data: PCM-16 audio data as bytes
-        in_rate: Input sample rate (e.g., 8000)
-        out_rate: Output sample rate (e.g., 16000)
-        sample_width: Sample width in bytes (default 2 for PCM-16)
-
-    Returns:
-        Resampled audio data as bytes
+    One instance handles one direction of one stream; create a fresh pair
+    per connection.
     """
-    # Convert bytes to numpy array
-    audio_np = np.frombuffer(audio_data, dtype=np.int16)
 
-    # Calculate resampling ratio using GCD to get simplest fraction
-    from math import gcd
+    def __init__(self, in_rate: int, out_rate: int) -> None:
+        g = gcd(in_rate, out_rate)
+        self.up = out_rate // g
+        self.down = in_rate // g
+        fs_up = in_rate * self.up
 
-    ratio_gcd = gcd(in_rate, out_rate)
-    up = out_rate // ratio_gcd
-    down = in_rate // ratio_gcd
+        # Telephony-band lowpass: pass 3400 Hz, stop 4000 Hz, 60 dB attenuation.
+        # ~97 taps at fs=16k / ~145 at fs=24k → ~3 ms group delay either way.
+        numtaps, beta = signal.kaiserord(60.0, (4000 - 3400) / (fs_up / 2))
+        numtaps |= 1
+        taps = signal.firwin(numtaps, 3700.0, window=("kaiser", beta), fs=fs_up)
+        # Zero-stuffing by `up` scales the passband down by `up`; compensate so
+        # overall gain stays exactly 1 (firwin gives unity DC gain).
+        self.taps = taps.astype(np.float64) * self.up
+        assert abs(self.taps.sum() - self.up) < 1e-6
 
-    # Use scipy's high-quality polyphase resampler
-    # This is much better than linear interpolation
-    resampled = signal.resample_poly(audio_np, up, down)
+        self._zi_zero = np.zeros(numtaps - 1)
+        self.reset()
 
-    # Convert back to int16 and then to bytes
-    return resampled.astype(np.int16).tobytes()
+    def reset(self) -> None:
+        """Drop all carried state (use when the output stream is discarded)."""
+        self.zi = self._zi_zero.copy()
+        self.phase = 0
+        self._carry = b""
+
+    def process(self, chunk: bytes) -> bytes:
+        """Convert a chunk of int16 PCM bytes; may return b"" for tiny inputs."""
+        data = self._carry + chunk
+        self._carry = b""
+        if len(data) & 1:
+            # int16 frames can split across WS messages; carry the odd byte.
+            self._carry = data[-1:]
+            data = data[:-1]
+        if not data:
+            return b""
+
+        x = np.frombuffer(data, dtype=np.int16).astype(np.float64)
+
+        if self.up > 1:
+            xu = np.zeros(len(x) * self.up)
+            xu[:: self.up] = x
+        else:
+            xu = x
+
+        y, self.zi = signal.lfilter(self.taps, 1.0, xu, zi=self.zi)
+
+        out = y[self.phase :: self.down]
+        self.phase = (self.phase - len(xu)) % self.down
+
+        return np.clip(np.rint(out), -32768, 32767).astype(np.int16).tobytes()
 
 
 # ---------------------------------------------------------------------------
@@ -276,10 +300,10 @@ async def stream_websocket(websocket: WebSocket) -> None:
     # Per-connection mutable state (accessed via closures below)
     stream_sid: str | None = None
 
-    # Audio buffering for smoother streaming
-    # Accumulate small chunks before processing to reduce choppiness
-    inbound_buffer: Deque[bytes] = deque(maxlen=BUFFER_CHUNK_COUNT)
-    outbound_buffer: Deque[bytes] = deque(maxlen=BUFFER_CHUNK_COUNT)
+    # Stateful resamplers — one per direction so filter state is continuous
+    # across chunks (no boundary clicks) for the lifetime of the stream.
+    inbound_resampler = StreamingResampler(8000, 16000)
+    outbound_resampler = StreamingResampler(24000, 8000)
 
     # ── Phase 3: Concurrent bidirectional streaming ──────────────────────────────
 
@@ -291,11 +315,10 @@ async def stream_websocket(websocket: WebSocket) -> None:
           Twilio WS msg (μ-law / 8 kHz, base64)
             → base64 decode
             → audioop.ulaw2lin  (μ-law → 16-bit PCM)
-            → buffer accumulation (5 chunks = ~100ms)
-            → scipy.signal.resample_poly (8 kHz → 16 kHz, high quality)
+            → StreamingResampler (8 kHz → 16 kHz, stateful, no boundary clicks)
             → LiveRequestQueue.send_realtime
         """
-        nonlocal stream_sid, inbound_buffer
+        nonlocal stream_sid
 
         try:
             while True:
@@ -326,27 +349,17 @@ async def stream_websocket(websocket: WebSocket) -> None:
                     # 2. μ-law → 16-bit PCM @ 8 000 Hz
                     pcm_8k: bytes = audioop.ulaw2lin(ulaw_data, 2)
 
-                    # 3. Buffer audio chunks for smoother streaming
-                    #    Twilio sends ~20ms chunks; we accumulate 5 chunks (~100ms)
-                    #    before resampling and sending to reduce choppiness
-                    inbound_buffer.append(pcm_8k)
+                    # 3. Resample 8 000 Hz → 16 000 Hz (required by ADK) and
+                    #    forward each 20 ms chunk immediately — the stateful
+                    #    resampler keeps audio continuous across chunks, so no
+                    #    accumulation (and no added latency) is needed.
+                    pcm_16k = inbound_resampler.process(pcm_8k)
 
-                    if len(inbound_buffer) >= BUFFER_CHUNK_COUNT:
-                        # Concatenate buffered chunks
-                        buffered_pcm_8k = b"".join(inbound_buffer)
-
-                        # 4. High-quality resample 8 000 Hz → 16 000 Hz (required by ADK)
-                        #    Using scipy instead of audioop for much better quality
-                        pcm_16k = resample_audio(buffered_pcm_8k, 8000, 16000)
-
-                        # 5. Send to ADK Live API
+                    if pcm_16k:
                         blob = types.Blob(
                             mime_type="audio/pcm;rate=16000", data=pcm_16k
                         )
                         live_request_queue.send_realtime(blob)
-
-                        # Clear buffer after sending
-                        inbound_buffer.clear()
 
                 elif event_type == "dtmf":
                     digit = msg.get("dtmf", {}).get("digit", "?")
@@ -370,7 +383,7 @@ async def stream_websocket(websocket: WebSocket) -> None:
 
         Message flow:
           runner.run_live() → Event (inline_data PCM-16 / 24 kHz)
-            → scipy.signal.resample_poly (24 kHz → 8 kHz, high quality)
+            → StreamingResampler (24 kHz → 8 kHz, stateful, no boundary clicks)
             → audioop.lin2ulaw (16-bit PCM → μ-law)
             → base64 encode
             → Twilio WS media message
@@ -381,8 +394,6 @@ async def stream_websocket(websocket: WebSocket) -> None:
           must tell Twilio to discard any audio already queued for playback
           (via the Twilio 'clear' message).
         """
-        nonlocal outbound_buffer
-
         try:
             async for event in runner.run_live(
                 user_id=user_id,
@@ -409,7 +420,9 @@ async def stream_websocket(websocket: WebSocket) -> None:
                 # Tell Twilio to throw away all buffered audio immediately.
                 if event.interrupted:
                     logger.info("Agent interrupted by user – sending Twilio clear")
-                    outbound_buffer.clear()
+                    # Twilio discards its queued playback on 'clear', so the
+                    # resampler's filter tail is stale — drop it too.
+                    outbound_resampler.reset()
                     if stream_sid:
                         await websocket.send_json(
                             {"event": "clear", "streamSid": stream_sid}
@@ -436,9 +449,11 @@ async def stream_websocket(websocket: WebSocket) -> None:
 
                     pcm_24k: bytes = part.inline_data.data
 
-                    # 1. High-quality resample 24 000 Hz → 8 000 Hz (required by Twilio)
-                    #    Using scipy for much better quality than audioop
-                    pcm_8k = resample_audio(pcm_24k, 24000, 8000)
+                    # 1. Resample 24 000 Hz → 8 000 Hz (required by Twilio),
+                    #    stateful so consecutive chunks join seamlessly
+                    pcm_8k = outbound_resampler.process(pcm_24k)
+                    if not pcm_8k:
+                        continue
 
                     # 2. 16-bit PCM → μ-law
                     ulaw_data: bytes = audioop.lin2ulaw(pcm_8k, 2)
