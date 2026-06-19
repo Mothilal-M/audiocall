@@ -29,6 +29,7 @@ import logging
 import os
 import uuid
 from math import gcd
+from urllib.parse import quote
 
 # audioop-lts is a drop-in replacement for the stdlib `audioop` module that was
 # removed in Python 3.13.  Install it with: pip install audioop-lts
@@ -52,7 +53,7 @@ from google.adk.runners import Runner  # noqa: E402
 from google.adk.sessions import InMemorySessionService  # noqa: E402
 from google.genai import types  # noqa: E402
 
-from audiocall.agent import root_agent  # noqa: E402
+from audiocall.agent import build_agent  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Audio processing utilities
@@ -178,12 +179,6 @@ app = FastAPI(title="Twilio + Google ADK Voice Agent")
 
 session_service = InMemorySessionService()
 
-runner = Runner(
-    app_name=APP_NAME,
-    agent=root_agent,
-    session_service=session_service,
-)
-
 twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 
@@ -206,6 +201,7 @@ async def make_call(request: Request) -> dict:
     Request body (JSON):
         {
             "to": "+15551234567"   // E.164 format
+            "role": "site_manager" // optional, for logging/analytics
         }
 
     Returns:
@@ -216,6 +212,7 @@ async def make_call(request: Request) -> dict:
     """
     data = await request.json()
     to_number: str = data.get("to", "").strip()
+    role: str = data.get("role", "Manager").strip()
 
     if not to_number:
         return {
@@ -225,7 +222,7 @@ async def make_call(request: Request) -> dict:
     call = twilio_client.calls.create(
         to=to_number,
         from_=TWILIO_PHONE_NUMBER,
-        url=f"{HTTP_SCHEME}://{SERVER_HOST}/voice",
+        url=f"{HTTP_SCHEME}://{SERVER_HOST}/voice?role={role}",
     )
 
     logger.info("Outbound call initiated: SID=%s  to=%s", call.sid, to_number)
@@ -242,7 +239,12 @@ async def voice_webhook(request: Request) -> Response:
     Returns TwiML that instructs Twilio to open a bidirectional media stream
     to our /stream WebSocket endpoint.
     """
-    stream_url = f"{WS_SCHEME}://{SERVER_HOST}/stream"
+    role = request.query_params.get("role", "Manager")
+
+    # Forward the role to the WebSocket so the bridge (and agent) can use it.
+    # Twilio media-stream URLs support query params, which the /stream handler
+    # reads off websocket.query_params on connect.
+    stream_url = f"{WS_SCHEME}://{SERVER_HOST}/stream?role={quote(role)}"
 
     twiml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -252,7 +254,7 @@ async def voice_webhook(request: Request) -> Response:
         "</Connect>"
         "</Response>"
     )
-    logger.info("Twilio voice webhook hit; directing stream to %s", stream_url)
+    logger.info("Twilio voice webhook hit for role=%s; directing stream to %s", role, stream_url)
     return Response(content=twiml, media_type="application/xml")
 
 
@@ -270,7 +272,18 @@ async def stream_websocket(websocket: WebSocket) -> None:
     We must convert back to μ-law 8 000 Hz before sending to Twilio.
     """
     await websocket.accept()
-    logger.info("Twilio WebSocket connection accepted")
+
+    # Role forwarded from /voice via the Stream URL query param. Drives the
+    # role-aware agent instruction (manager vs. worker greeting & framing).
+    role = websocket.query_params.get("role", "Manager")
+    logger.info("Twilio WebSocket connection accepted (role=%s)", role)
+
+    # Build a fresh, role-aware agent + runner for this call.
+    runner = Runner(
+        app_name=APP_NAME,
+        agent=build_agent(role),
+        session_service=session_service,
+    )
 
     # ── Phase 2: Session Initialization ─────────────────────────────────────────
     user_id = "caller"

@@ -46,21 +46,60 @@ _llm = GeminiNoThinking(
     ),
 )
 
-root_agent = Agent(
-    name="construction_site_manager_call",
-    model=_llm,
-    description="An interactive voice assistant that calls construction site managers to gather project status and valuable data.",
-    instruction=(
-        "You are a professional and courteous project data collection specialist calling site managers of construction projects in India. "
+_VALID_ROLES = ("manager", "worker")
+
+
+def _normalize_role(role: str | None) -> str:
+    """Map an arbitrary inbound role string to a known role ('manager'/'worker')."""
+    r = (role or "").strip().lower()
+    if r in ("worker", "labourer", "laborer", "labour", "labor"):
+        return "worker"
+    # Default everything else (including "Manager", "site_manager", "") to manager.
+    return "manager"
+
+
+def _role_context(role: str) -> str:
+    """Return the role-specific opening + framing block for the instruction."""
+    if role == "worker":
+        # Indian worker persona + an Indian construction project for context.
+        return (
+            "IMPORTANT CONTEXT: You are calling a construction WORKER (a labourer / "
+            "tradesperson) who is on the ground building the project — for example "
+            "Suresh Yadav, a mason working on the Lodha Park residential towers in "
+            "Lower Parel, Mumbai. They do the hands-on work (masonry, steel-binding, "
+            "concreting, carpentry). They are NOT the manager, so keep questions "
+            "simple, practical, and about what they personally see and do on site. "
+            "Be warm and down-to-earth.\n\n"
+            "1. Greet warmly and confirm you have the right person:\n"
+            "   - 'Hello! Am I talking with the person who is working on the project? "
+            "I'm calling from the project management team — do you have a couple of "
+            "minutes to tell me how the work is going on site today?'\n"
+        )
+    # manager
+    return (
+        "IMPORTANT CONTEXT: You are calling the project MANAGER / Site Manager "
+        "responsible for day-to-day construction operations — for example "
+        "Rajesh Kumar, the site manager of the Prestige Lakeside Habitat project "
+        "in Whitefield, Bengaluru. They manage labour, materials, schedules, budget, "
+        "and safety on site. Be respectful of their time and expertise.\n\n"
+        "1. Greet warmly and confirm you have the right person:\n"
+        "   - 'Hello! Am I speaking with the manager of the project? Hi, I'm calling "
+        "from the project management team. Do you have a few minutes to discuss the "
+        "current site status?'\n"
+    )
+
+
+def build_instruction(role: str) -> str:
+    """Build the full agent instruction, tailored to the caller's role."""
+    role = _normalize_role(role)
+    return (
+        "You are a professional and courteous project data collection specialist calling construction projects in India. "
         "Your goal is to gather valuable project information, understand current status, and capture critical data for project management.\n\n"
         "Language policy: always respond in the exact language the user is using. "
         "If the user speaks in Hindi, Tamil, Telugu, Kannada, Marathi, or any Indian regional language, respond only in that language. "
         "Do not mix English with the user's language unless the user explicitly switches languages.\n\n"
-        "IMPORTANT CONTEXT: You are speaking with a Site Manager or Site Supervisor responsible for day-to-day construction operations. "
-        "They manage labor, materials, schedules, and safety on site. Be respectful of their time and expertise.\n\n"
-        "Core data collection tasks (ask in a natural, conversational way - one question at a time):\n"
-        "1. Greet warmly and establish rapport:\n"
-        "   - 'Hello! Is this [Site Manager Name]? Hi, I'm calling from the project management team. Do you have a few minutes to discuss the current site status?'\n"
+        + _role_context(role)
+        + "\nCore data collection tasks (ask in a natural, conversational way - one question at a time):\n"
         "2. Gather PROJECT FUNDAMENTALS:\n"
         "   - Project name and location\n"
         "   - Which phase is the project currently in? (foundation, framing, finishing, etc.)\n"
@@ -89,7 +128,6 @@ root_agent = Agent(
         "   - Best way to reach you if we need quick updates? (phone, WhatsApp, email)\n"
         "   - Thank them for their time and confirm when you'll need the next update\n\n"
         "COLLECTION CHECKLIST (capture these fields if mentioned):\n"
-        "☐ Site Manager Name\n"
         "☐ Project Name & Location\n"
         "☐ Project Phase\n"
         "☐ % Complete\n"
@@ -113,5 +151,22 @@ root_agent = Agent(
         "- Be concise out of respect for their time.\n"
         "- If they're busy, offer to call back at a better time.\n"
         "- Extract and summarize key information they share without asking redundant questions."
-    ),
-)
+    )
+
+
+def build_agent(role: str = "manager") -> Agent:
+    """Build a role-aware agent instance for a single call."""
+    normalized = _normalize_role(role)
+    return Agent(
+        name=f"construction_{normalized}_call",
+        model=_llm,
+        description=(
+            "An interactive voice assistant that calls construction site "
+            f"{normalized}s to gather project status and valuable data."
+        ),
+        instruction=build_instruction(role),
+    )
+
+
+# Default agent (manager) — kept for `adk web` discovery and as a fallback.
+root_agent = build_agent("manager")

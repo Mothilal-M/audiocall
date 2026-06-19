@@ -132,6 +132,24 @@ curl -X POST https://your-public-host/call \
   -d '{"to": "+15551234567"}'
 ```
 
+curl -X POST https://nqpg4hnn-8000.inc1.devtunnels.ms/call \
+  -H "Content-Type: application/json" \
+  -d '{"to": "+15551234567"}'
+
+
+curl -X POST https://nqpg4hnn-8000.inc1.devtunnels.ms/call   -H "Content-Type: application/json"   -d '{"to": "+919787962328"}'
+
+curl -X POST https://audio-call.10xscale.ai/call \
+  -H "Content-Type: application/json" \
+  -d '{"to": "+919787962328"}'
+
+
+
+
+
+
+
+
 Example response:
 
 ```json
