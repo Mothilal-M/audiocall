@@ -170,10 +170,6 @@ VAD_SILENCE_MS: int = int(os.environ.get("VAD_SILENCE_MS", "200"))
 WS_SCHEME = "wss" if USE_TLS else "ws"
 HTTP_SCHEME = "https" if USE_TLS else "http"
 
-# Twilio media stream is μ-law @ 8 kHz.  One 20 ms frame = 8000 * 0.020 = 160
-# bytes.  Sending outbound audio in exact 20 ms frames keeps playback smooth.
-TWILIO_FRAME_BYTES = 160
-
 # ---------------------------------------------------------------------------
 # Phase 1: Application-level objects (created once at startup)
 # ---------------------------------------------------------------------------
@@ -333,12 +329,6 @@ async def stream_websocket(websocket: WebSocket) -> None:
     inbound_resampler = StreamingResampler(8000, 16000)
     outbound_resampler = StreamingResampler(24000, 8000)
 
-    # Twilio plays inbound media best when fed steady 20 ms frames rather than
-    # whatever (often large, irregular) burst Gemini emits.  We accumulate
-    # μ-law bytes here and ship exactly TWILIO_FRAME_BYTES per media message;
-    # the remainder waits for the next burst.  Cleared on barge-in.
-    outbound_ulaw_buf = bytearray()
-
     # ── Phase 3: Concurrent bidirectional streaming ──────────────────────────────
 
     async def upstream_task() -> None:
@@ -455,10 +445,8 @@ async def stream_websocket(websocket: WebSocket) -> None:
                 if event.interrupted:
                     logger.info("Agent interrupted by user – sending Twilio clear")
                     # Twilio discards its queued playback on 'clear', so the
-                    # resampler's filter tail and any un-sent frame remainder
-                    # are stale — drop them too.
+                    # resampler's filter tail is stale — drop it too.
                     outbound_resampler.reset()
-                    outbound_ulaw_buf.clear()
                     if stream_sid:
                         await websocket.send_json(
                             {"event": "clear", "streamSid": stream_sid}
@@ -467,20 +455,7 @@ async def stream_websocket(websocket: WebSocket) -> None:
 
                 if event.turn_complete:
                     logger.info("Agent turn complete")
-                    # Flush any leftover (<20 ms) tail so the end of the last
-                    # word isn't held back until the next turn.  Pad to a full
-                    # frame with μ-law silence (0xFF == encoded PCM zero).
-                    if stream_sid and outbound_ulaw_buf:
-                        pad = TWILIO_FRAME_BYTES - len(outbound_ulaw_buf)
-                        frame = bytes(outbound_ulaw_buf) + b"\xff" * pad
-                        outbound_ulaw_buf.clear()
-                        await websocket.send_json(
-                            {
-                                "event": "media",
-                                "streamSid": stream_sid,
-                                "media": {"payload": base64.b64encode(frame).decode()},
-                            }
-                        )
+                    # turn_complete events carry no audio; nothing to forward.
                     continue
 
                 # ── Forward audio parts to Twilio ─────────────────────────────
@@ -504,24 +479,22 @@ async def stream_websocket(websocket: WebSocket) -> None:
                     if not pcm_8k:
                         continue
 
-                    # 2. 16-bit PCM → μ-law, then buffer it
-                    outbound_ulaw_buf.extend(audioop.lin2ulaw(pcm_8k, 2))
+                    # 2. 16-bit PCM → μ-law
+                    ulaw_data: bytes = audioop.lin2ulaw(pcm_8k, 2)
 
-                    # 3. Emit steady 20 ms (160-byte) frames; keep the tail for
-                    #    the next burst so Twilio always gets uniform frames.
+                    # 3. Base64-encode and send to Twilio. Per Twilio's spec the
+                    #    outbound media payload may be any size, so we forward
+                    #    each resampled burst directly (no re-framing needed).
                     if stream_sid:
-                        while len(outbound_ulaw_buf) >= TWILIO_FRAME_BYTES:
-                            frame = bytes(outbound_ulaw_buf[:TWILIO_FRAME_BYTES])
-                            del outbound_ulaw_buf[:TWILIO_FRAME_BYTES]
-                            await websocket.send_json(
-                                {
-                                    "event": "media",
-                                    "streamSid": stream_sid,
-                                    "media": {
-                                        "payload": base64.b64encode(frame).decode()
-                                    },
-                                }
-                            )
+                        await websocket.send_json(
+                            {
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {
+                                    "payload": base64.b64encode(ulaw_data).decode()
+                                },
+                            }
+                        )
 
         except WebSocketDisconnect:
             logger.info("Twilio WebSocket disconnected (downstream)")
