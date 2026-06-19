@@ -302,16 +302,16 @@ async def stream_websocket(websocket: WebSocket) -> None:
         # Enable transcription so we can log what was said
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
-        # Tighten VAD: respond faster after the caller stops speaking.
-        # END_SENSITIVITY_HIGH + a short silence window cuts the "wait" after
-        # each utterance from the default ~800 ms down to VAD_SILENCE_MS.
-        # START_SENSITIVITY_HIGH makes Gemini notice the caller's voice sooner
-        # (faster turn starts and barge-in).  If callers get cut off while
-        # pausing mid-sentence, raise VAD_SILENCE_MS (e.g. 300-400).
+        # VAD tuning.  END_SENSITIVITY_HIGH + a short silence window cuts the
+        # "wait" after each utterance down to VAD_SILENCE_MS.
+        # START_SENSITIVITY_LOW makes Gemini less trigger-happy about detecting
+        # the caller's voice, so line noise / echo / background sound is far
+        # less likely to falsely interrupt the agent mid-sentence.  If real
+        # barge-in feels sluggish, raise this back to HIGH.
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
                 start_of_speech_sensitivity=(
-                    types.StartSensitivity.START_SENSITIVITY_HIGH
+                    types.StartSensitivity.START_SENSITIVITY_LOW
                 ),
                 end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
                 silence_duration_ms=VAD_SILENCE_MS,

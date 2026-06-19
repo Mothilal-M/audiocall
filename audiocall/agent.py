@@ -48,6 +48,16 @@ _llm = GeminiNoThinking(
 
 _VALID_ROLES = ("manager", "worker")
 
+# ── POC call context ────────────────────────────────────────────────────────
+# For this proof-of-concept we already know exactly who we're calling and which
+# project, so the agent must speak as if it has that context — never ask "which
+# project" or "are you working on a project". One fixed project, one name per
+# role. In production these would be looked up per call and injected here.
+PROJECT_NAME = "Prestige Lakeside Habitat"
+PROJECT_LOCATION = "Whitefield, Bengaluru"
+MANAGER_NAME = "Rajesh Kumar"
+WORKER_NAME = "Suresh Yadav"
+
 
 def _normalize_role(role: str | None) -> str:
     """Map an arbitrary inbound role string to a known role ('manager'/'worker')."""
@@ -59,33 +69,41 @@ def _normalize_role(role: str | None) -> str:
 
 
 def _role_context(role: str) -> str:
-    """Return the role-specific opening + framing block for the instruction."""
+    """Return the role-specific opening + framing block for the instruction.
+
+    The agent ALREADY KNOWS the project and the person — it must sound like a
+    colleague who has the context in front of them, confirming the person's
+    identity, NOT asking which project they work on.
+    """
+    project = f"the {PROJECT_NAME} project in {PROJECT_LOCATION}"
     if role == "worker":
-        # Indian worker persona + an Indian construction project for context.
         return (
-            "IMPORTANT CONTEXT: You are calling a construction WORKER (a labourer / "
-            "tradesperson) who is on the ground building the project — for example "
-            "Suresh Yadav, a mason working on the Lodha Park residential towers in "
-            "Lower Parel, Mumbai. They do the hands-on work (masonry, steel-binding, "
-            "concreting, carpentry). They are NOT the manager, so keep questions "
-            "simple, practical, and about what they personally see and do on site. "
+            f"IMPORTANT CONTEXT: You are calling {WORKER_NAME}, a construction "
+            f"WORKER (a mason / tradesperson) doing hands-on work on {project}. "
+            "You already know this — do NOT ask which project they work on or "
+            "whether they work on a project. They do the physical work (masonry, "
+            "steel-binding, concreting, carpentry), so keep questions simple, "
+            "practical, and about what they personally see and do on site today. "
             "Be warm and down-to-earth.\n\n"
-            "1. Greet warmly and confirm you have the right person:\n"
-            "   - 'Hello! Am I talking with the person who is working on the project? "
-            "I'm calling from the project management team — do you have a couple of "
-            "minutes to tell me how the work is going on site today?'\n"
+            "1. Open by confirming you reached the right person, showing you "
+            "already have their context:\n"
+            f"   - 'Hello! Am I speaking with {WORKER_NAME}, who's working on "
+            f"{project}? Hi, I'm calling from the project management team — do "
+            "you have a couple of minutes to tell me how the work is going on "
+            "site today?'\n"
         )
     # manager
     return (
-        "IMPORTANT CONTEXT: You are calling the project MANAGER / Site Manager "
-        "responsible for day-to-day construction operations — for example "
-        "Rajesh Kumar, the site manager of the Prestige Lakeside Habitat project "
-        "in Whitefield, Bengaluru. They manage labour, materials, schedules, budget, "
-        "and safety on site. Be respectful of their time and expertise.\n\n"
-        "1. Greet warmly and confirm you have the right person:\n"
-        "   - 'Hello! Am I speaking with the manager of the project? Hi, I'm calling "
-        "from the project management team. Do you have a few minutes to discuss the "
-        "current site status?'\n"
+        f"IMPORTANT CONTEXT: You are calling {MANAGER_NAME}, the site MANAGER "
+        f"responsible for day-to-day operations on {project}. You already know "
+        "this — do NOT ask which project they manage or whether they work on a "
+        "project. They manage labour, materials, schedules, budget, and safety "
+        "on site. Be respectful of their time and expertise.\n\n"
+        "1. Open by confirming you reached the right person, showing you "
+        "already have their context:\n"
+        f"   - 'Hello! Am I speaking with {MANAGER_NAME}, the manager of "
+        f"{project}? Hi, I'm calling from the project management team. Do you "
+        "have a few minutes to go over the current site status?'\n"
     )
 
 
@@ -100,8 +118,8 @@ def build_instruction(role: str) -> str:
         "Do not mix English with the user's language unless the user explicitly switches languages.\n\n"
         + _role_context(role)
         + "\nCore data collection tasks (ask in a natural, conversational way - one question at a time):\n"
-        "2. Gather PROJECT FUNDAMENTALS:\n"
-        "   - Project name and location\n"
+        "2. PROJECT STATUS (you already know the project name & location — never "
+        "ask for them; just confirm current status):\n"
         "   - Which phase is the project currently in? (foundation, framing, finishing, etc.)\n"
         "3. SCHEDULE & PROGRESS:\n"
         "   - What percentage is the project complete?\n"
@@ -128,7 +146,6 @@ def build_instruction(role: str) -> str:
         "   - Best way to reach you if we need quick updates? (phone, WhatsApp, email)\n"
         "   - Thank them for their time and confirm when you'll need the next update\n\n"
         "COLLECTION CHECKLIST (capture these fields if mentioned):\n"
-        "☐ Project Name & Location\n"
         "☐ Project Phase\n"
         "☐ % Complete\n"
         "☐ Schedule Status (on-time/ahead/behind)\n"
