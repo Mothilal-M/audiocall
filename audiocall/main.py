@@ -29,7 +29,7 @@ import logging
 import os
 import uuid
 from math import gcd
-from urllib.parse import quote
+from xml.sax.saxutils import quoteattr
 
 # audioop-lts is a drop-in replacement for the stdlib `audioop` module that was
 # removed in Python 3.13.  Install it with: pip install audioop-lts
@@ -241,16 +241,20 @@ async def voice_webhook(request: Request) -> Response:
     """
     role = request.query_params.get("role", "Manager")
 
-    # Forward the role to the WebSocket so the bridge (and agent) can use it.
-    # Twilio media-stream URLs support query params, which the /stream handler
-    # reads off websocket.query_params on connect.
-    stream_url = f"{WS_SCHEME}://{SERVER_HOST}/stream?role={quote(role)}"
+    # Forward the role to the Media Stream via a <Parameter> child element.
+    # NOTE: Twilio DROPS query-string params on the <Stream> url, so we must NOT
+    # put ?role= on the URL — it would silently vanish and every call would
+    # default to manager. Custom params must be passed as <Parameter>, which
+    # Twilio delivers in the WebSocket "start" event under start.customParameters.
+    stream_url = f"{WS_SCHEME}://{SERVER_HOST}/stream"
 
     twiml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response>"
         "<Connect>"
-        f'<Stream url="{stream_url}"/>'
+        f'<Stream url="{stream_url}">'
+        f"<Parameter name=\"role\" value={quoteattr(role)}/>"
+        "</Stream>"
         "</Connect>"
         "</Response>"
     )
@@ -272,11 +276,39 @@ async def stream_websocket(websocket: WebSocket) -> None:
     We must convert back to μ-law 8 000 Hz before sending to Twilio.
     """
     await websocket.accept()
+    logger.info("Twilio WebSocket connection accepted")
 
-    # Role forwarded from /voice via the Stream URL query param. Drives the
-    # role-aware agent instruction (manager vs. worker greeting & framing).
-    role = websocket.query_params.get("role", "Manager")
-    logger.info("Twilio WebSocket connection accepted (role=%s)", role)
+    # ── Read role from Twilio's "start" event ────────────────────────────────
+    # Twilio DROPS query-string params on the <Stream> url, so the role can't be
+    # read from websocket.query_params. It is passed instead as a <Stream>
+    # <Parameter name="role" .../> child (see /voice), which Twilio delivers in
+    # the "start" event under start.customParameters. We must read that event
+    # BEFORE building the agent, because the agent instruction is role-specific.
+    role = "Manager"
+    stream_sid: str | None = None
+    while True:
+        raw = await websocket.receive_text()
+        msg = json.loads(raw)
+        event_type = msg.get("event", "")
+        if event_type == "connected":
+            logger.info(
+                "Twilio Media Stream connected (protocol=%s)", msg.get("protocol")
+            )
+            continue
+        if event_type == "start":
+            stream_sid = msg.get("streamSid")
+            start_meta = msg.get("start", {})
+            role = (start_meta.get("customParameters") or {}).get("role", "Manager")
+            logger.info(
+                "Media Stream started: streamSid=%s  callSid=%s  role=%s",
+                stream_sid,
+                start_meta.get("callSid", "unknown"),
+                role,
+            )
+            break
+        if event_type == "stop":
+            logger.info("Media Stream stopped before start; closing")
+            return
 
     # Build a fresh, role-aware agent + runner for this call.
     runner = Runner(
@@ -336,8 +368,8 @@ async def stream_websocket(websocket: WebSocket) -> None:
 
     live_request_queue = LiveRequestQueue()
 
-    # Per-connection mutable state (accessed via closures below)
-    stream_sid: str | None = None
+    # stream_sid was captured from the "start" event above; the tasks below
+    # read/update it via closure.
 
     # Stateful resamplers — one per direction so filter state is continuous
     # across chunks (no boundary clicks) for the lifetime of the stream.
@@ -357,30 +389,13 @@ async def stream_websocket(websocket: WebSocket) -> None:
             → StreamingResampler (8 kHz → 16 kHz, stateful, no boundary clicks)
             → LiveRequestQueue.send_realtime
         """
-        nonlocal stream_sid
-
         try:
             while True:
                 raw = await websocket.receive_text()
                 msg: dict = json.loads(raw)
                 event_type: str = msg.get("event", "")
 
-                if event_type == "connected":
-                    logger.info(
-                        "Twilio Media Stream connected (protocol=%s)",
-                        msg.get("protocol"),
-                    )
-
-                elif event_type == "start":
-                    stream_sid = msg.get("streamSid")
-                    start_meta = msg.get("start", {})
-                    logger.info(
-                        "Media Stream started: streamSid=%s  callSid=%s",
-                        stream_sid,
-                        start_meta.get("callSid", "unknown"),
-                    )
-
-                elif event_type == "media":
+                if event_type == "media":
                     # 1. Decode base64 → raw μ-law bytes
                     payload_b64: str = msg["media"]["payload"]
                     ulaw_data: bytes = base64.b64decode(payload_b64)
