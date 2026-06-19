@@ -317,6 +317,21 @@ async def stream_websocket(websocket: WebSocket) -> None:
                 silence_duration_ms=VAD_SILENCE_MS,
             )
         ),
+        # ── Long-call stability ─────────────────────────────────────────────
+        # The Live API caps a single connection (~10 min) and terminates the
+        # session once the 128k context window fills (native audio burns
+        # ~25 tokens/sec).  These two settings let a long call survive both:
+        #   - session_resumption: ADK transparently reconnects using a server
+        #     resumption handle, so the conversation continues across the
+        #     connection-lifetime cap and any GoAway-driven reconnect.
+        #   - context_window_compression: a server-side sliding window evicts
+        #     the oldest turns instead of ending the session, giving
+        #     effectively unlimited duration.
+        session_resumption=types.SessionResumptionConfig(),
+        context_window_compression=types.ContextWindowCompressionConfig(
+            trigger_tokens=100_000,
+            sliding_window=types.SlidingWindow(target_tokens=80_000),
+        ),
     )
 
     live_request_queue = LiveRequestQueue()
