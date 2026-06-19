@@ -135,15 +135,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Suppress the noisy "1000 None" WebSocket Normal Closure log that ADK emits
-# at the end of every call — it's not an application error, just the stream
-# closing cleanly, but ADK logs it at ERROR level.
-logging.getLogger("google_adk.google.adk.flows.llm_flows.base_llm_flow").setLevel(
-    logging.CRITICAL
-)
+# Keep the ADK live-flow logger at INFO so we can SEE long-call behaviour:
+# "Connection closed: ...", "Attempting to reconnect (Attempt N)..." and
+# "Update session resumption handle: ...". Muting this (e.g. at CRITICAL)
+# makes a dropped/cap-hit connection look like a silent "turn complete" with
+# no error — which is exactly what hides why a long call freezes.
+logging.getLogger(
+    "google_adk.google.adk.flows.llm_flows.base_llm_flow"
+).setLevel(logging.INFO)
 
-# Also suppress normal WebSocket closure errors from google.genai
-logging.getLogger("google.genai.live").setLevel(logging.CRITICAL)
+# google.genai.live logs the benign "1000 (OK)" normal-closure at ERROR at the
+# end of every call. Keep it visible but only above ERROR-noise — WARNING lets
+# real protocol problems through while dropping the cosmetic close message.
+logging.getLogger("google.genai.live").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
 # Configuration from environment variables
