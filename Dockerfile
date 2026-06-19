@@ -24,7 +24,6 @@ RUN uv sync --frozen --no-dev --no-install-project
 # 2) Add the app and install the project itself (README is referenced by pyproject).
 COPY README.md ./
 COPY audiocall ./audiocall
-RUN uv sync --frozen --no-dev
 
 # Put the venv on PATH so `uvicorn` resolves without `uv run`.
 ENV PATH="/app/.venv/bin:$PATH"
